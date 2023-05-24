@@ -7,7 +7,7 @@ use vulkano::{
     },
     instance::{Instance, InstanceCreateInfo},
     memory::allocator::{AllocationCreateInfo, MemoryUsage, StandardMemoryAllocator, GenericMemoryAllocator, FreeListAllocator},
-    VulkanLibrary, command_buffer::{allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo}, AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo}, sync::{self, GpuFuture},
+    VulkanLibrary, pipeline::ComputePipeline,
 };
 
 fn list_gpus(instance: Arc<Instance>) {
@@ -105,6 +105,34 @@ fn create_data(memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>
     ).expect("Failed to create buffer.")
 }
 
+mod cs{
+    vulkano_shaders::shader!{
+        ty: "compute",
+        src: r"
+// Version 4.60 of GLSL, set the GLSL version at the start of every shader
+#version 460
+
+// The number of invocations per dimension per work group (at least 32, at most 64)
+// y and z are 1 for 1-dimensional arrays, but can be higher for multi-dimensional arrays
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// A descriptor of a buffer with the name buf, which contains a uint (u32) array
+layout(set = 0, binding = 0) buffer Data{
+    uint data[];
+} buf;
+
+// Main function
+void main(){
+    // The index of the current invocation
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Multiply the value at the current index with 12
+    buf.data[idx] *= 12;
+}
+        "
+    }
+}
+
 fn main() {
     // Initialize Vulkan and store a reference to a device, a graphical queue family index, and the first queue of that queue family
     let (device, queue, queue_family_index) = initialization();
@@ -113,4 +141,17 @@ fn main() {
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 
     let data = create_data(&memory_allocator);
+
+    // Load the shader into the device
+    let shader = cs::load(device.clone())
+        .expect("Failed to create shader module.");
+
+    // Create a compute pipeline, an object that actually describes the compute operation to perform.
+    let compute_pipeline = ComputePipeline::new(
+        device.clone(),
+        shader.entry_point("main").unwrap(),
+        &(),
+        None,
+        |_|{}
+    ).expect("Failed to create compute pipeline");
 }
