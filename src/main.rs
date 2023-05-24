@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use vulkano::{
     instance::{Instance, InstanceCreateInfo},
-    VulkanLibrary, device::physical::PhysicalDevice,
+    VulkanLibrary, device::{physical::PhysicalDevice, QueueFlags, Device, DeviceCreateInfo, QueueCreateInfo},
 };
 
 fn list_gpus(instance: Arc<Instance>){
@@ -25,7 +25,7 @@ fn main() {
     // Get a vulkan instance
     let library = VulkanLibrary::new().expect("No local Vulkan library/DLL");
     let instance =
-        Instance::new(library, InstanceCreateInfo::default()).expect("failed to create instance");
+        Instance::new(library, InstanceCreateInfo::default()).expect("Failed to create instance");
 
     list_gpus(instance.clone());
 
@@ -34,7 +34,34 @@ fn main() {
         .enumerate_physical_devices()
         .expect("Could not enumerate devices")
         .next()
-        .expect("no devices available");
+        .expect("No devices available");
 
+    // List the queues available on the selected device
     list_queues(physical_device.clone());
+
+    // Select a queue that supports graphical operations
+    let queue_family_index = physical_device
+        .queue_family_properties()
+        .iter()
+        .enumerate()
+        .position(|(_queue_family_index, queue_family_properties)|{
+            queue_family_properties.queue_flags.contains(QueueFlags::GRAPHICS)
+        })
+        .expect("Couldn't find a graphical queue family") as u32;
+    
+    // Create a new Vulkan device, returning the device and an iterator over queues on that device
+    let (device, mut queues) = Device::new(
+        physical_device,
+        DeviceCreateInfo{
+            // Here we pass the desired queue family to use by index
+            queue_create_infos: vec![QueueCreateInfo{
+                queue_family_index,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    ).expect("Failed to create device");
+
+    // Select the first queue
+    let queue = queues.next().unwrap();
 }
