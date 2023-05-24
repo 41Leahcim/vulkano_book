@@ -100,7 +100,7 @@ fn main() {
 
     // Allocate some data, MemoryUsage::Upload and MemoryUsage::Download are slow, but easy to access from cpu
     let data: i32 = 12;
-    let buffer = Buffer::from_data(
+    let i32_buffer = Buffer::from_data(
         &memory_allocator, // Memory allocator to use
         BufferCreateInfo {
             usage: BufferUsage::UNIFORM_BUFFER, // The usage for which we create the buffer
@@ -118,7 +118,7 @@ fn main() {
     let data = MyStruct { a: 5, b: 69 };
 
     // Allocate some data to put the struct in the memory of the gpu
-    let buffer = Buffer::from_data(
+    let my_struct_buffer = Buffer::from_data(
         &memory_allocator, // Memory allocator to use
         BufferCreateInfo {
             usage: BufferUsage::UNIFORM_BUFFER, // The usage for which we create the buffer
@@ -136,7 +136,7 @@ fn main() {
     let iter = (0..128).map(|_| 5u8);
 
     // Allocate some data to put the data of the iterator in the memory of the gpu
-    let buffer = Buffer::from_iter(
+    let iter_buffer = Buffer::from_iter(
         &memory_allocator, // Memory allocator to use
         BufferCreateInfo {
             usage: BufferUsage::UNIFORM_BUFFER, // The usage for which we create the buffer
@@ -149,4 +149,22 @@ fn main() {
         iter, // The value(s) with which the buffer will be filled
     )
     .expect("Failed to create buffer");
+
+    // Modify the values in the my_struct_buffer, only the cpu will be able to access it as long as the BufferWriteGuard exists
+    {
+        let mut content = my_struct_buffer.write().unwrap();
+        content.a *= 2;
+        content.b = 9;
+    }// End scope to allow the gpu to access the data again
+
+    // Repeat for the iter_buffer
+    {
+        let mut content = iter_buffer.write().unwrap();
+        content[12] = 83;
+        content[7] = 3;
+    }
+
+    // This won't stop the gpu from accessing the data
+    let content = iter_buffer.read().unwrap();
+    println!("{}", content[7]);
 }
