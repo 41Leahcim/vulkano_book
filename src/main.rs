@@ -7,7 +7,7 @@ use vulkano::{
     },
     instance::{Instance, InstanceCreateInfo},
     memory::allocator::{AllocationCreateInfo, MemoryUsage, StandardMemoryAllocator, GenericMemoryAllocator, FreeListAllocator},
-    VulkanLibrary, pipeline::{ComputePipeline, Pipeline}, descriptor_set::{allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet},
+    VulkanLibrary, pipeline::{ComputePipeline, Pipeline, PipelineBindPoint}, descriptor_set::{allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet}, command_buffer::{allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo}, AutoCommandBufferBuilder, CommandBufferUsage}, sync::{self, GpuFuture},
 };
 
 fn list_gpus(instance: Arc<Instance>) {
@@ -175,4 +175,53 @@ fn main() {
         [WriteDescriptorSet::buffer(0, data_buffer.clone())]
     )
     .unwrap();
+
+    // Create the command buffer allocator
+    let command_buffer_allocator = StandardCommandBufferAllocator::new(
+        device.clone(),
+        StandardCommandBufferAllocatorCreateInfo::default()
+    );
+
+    // Create a command buffer builder
+    let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
+        &command_buffer_allocator,
+        queue_family_index,
+        CommandBufferUsage::OneTimeSubmit
+    ).unwrap();
+
+    // Set the number of work groups per dimension (x, y, z)
+    let work_group_counts = [1024, 1, 1];
+
+    // Bind the compute pipeline and descriptor sets, finally dispatch it over work groups.
+    command_buffer_builder
+        .bind_pipeline_compute(compute_pipeline.clone())
+        .bind_descriptor_sets(
+            PipelineBindPoint::Compute,
+            compute_pipeline.layout().clone(),
+            descriptor_set_layout_index as u32,
+            descriptor_set
+        )
+        .dispatch(work_group_counts)
+        .unwrap();
+
+    // Build the command buffer
+    let command_buffer = command_buffer_builder.build().unwrap();
+
+    // Submit the command buffer
+    let future = sync::now(device.clone())
+        .then_execute(queue.clone(), command_buffer)
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap();
+
+    // Wait for the future to complete
+    future.wait(None).unwrap();
+
+    // Check the output
+    let content = data_buffer.read().unwrap();
+    for (n, val) in content.iter().enumerate(){
+        assert_eq!(*val, n as u32 * 12);
+    }
+
+    println!("Everything succeeded!");
 }
