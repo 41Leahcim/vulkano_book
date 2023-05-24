@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use vulkano::{
-    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage},
+    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     device::{
         physical::PhysicalDevice, Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags,
     },
     instance::{Instance, InstanceCreateInfo},
-    memory::allocator::{AllocationCreateInfo, MemoryUsage, StandardMemoryAllocator},
-    VulkanLibrary,
+    memory::allocator::{AllocationCreateInfo, MemoryUsage, StandardMemoryAllocator, GenericMemoryAllocator, FreeListAllocator},
+    VulkanLibrary, command_buffer::{allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo}, AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo}, sync::{self, GpuFuture},
 };
 
 fn list_gpus(instance: Arc<Instance>) {
@@ -34,7 +34,20 @@ fn list_queues(physical_device: Arc<PhysicalDevice>) {
     }
 }
 
-fn initialization() -> (Arc<Device>, Arc<Queue>) {
+fn get_queue_family_index(physical_device: Arc<PhysicalDevice>, selection: QueueFlags) -> u32{
+    physical_device
+        .queue_family_properties()
+        .iter()
+        .enumerate()
+        .position(|(_queue_family_index, queue_family_properties)| {
+            queue_family_properties
+                .queue_flags
+                .contains(selection)
+        })
+        .expect("Couldn't find a graphical queue family") as u32
+}
+
+fn initialization() -> (Arc<Device>, Arc<Queue>, u32) {
     // Get a vulkan instance
     let library = VulkanLibrary::new().expect("No local Vulkan library/DLL");
     let instance =
@@ -53,16 +66,7 @@ fn initialization() -> (Arc<Device>, Arc<Queue>) {
     list_queues(physical_device.clone());
 
     // Select a queue that supports graphical operations
-    let queue_family_index = physical_device
-        .queue_family_properties()
-        .iter()
-        .enumerate()
-        .position(|(_queue_family_index, queue_family_properties)| {
-            queue_family_properties
-                .queue_flags
-                .contains(QueueFlags::GRAPHICS)
-        })
-        .expect("Couldn't find a graphical queue family") as u32;
+    let queue_family_index = get_queue_family_index(physical_device.clone(), QueueFlags::GRAPHICS);
 
     // Create a new Vulkan device, returning the device and an iterator over queues on that device
     let (device, mut queues) = Device::new(
@@ -81,27 +85,14 @@ fn initialization() -> (Arc<Device>, Arc<Queue>) {
     // Select the first queue
     let queue = queues.next().unwrap();
 
-    (device, queue)
+    (device, queue, queue_family_index)
 }
 
-#[derive(Debug, BufferContents)]
-#[repr(C)]
-struct MyStruct {
-    a: u32,
-    b: u32,
-}
-
-fn main() {
-    // Initialize Vulkan and store a reference to a device and it's first graphical queue
-    let (device, queue) = initialization();
-
-    // Create a general purpose memory allocator
-    let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
-
+fn create_data(memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>) -> (Subbuffer<[i32]>, Subbuffer<[i32]>){
     // Create the source data and buffer
-    let source_content = 0..64;
+    let source_content = 0..1_000_000_000;
     let source = Buffer::from_iter(
-        &memory_allocator,
+        memory_allocator,
         BufferCreateInfo{
             usage: BufferUsage::TRANSFER_SRC, // This data will be used as source for a data transfer
             ..Default::default()
@@ -114,9 +105,9 @@ fn main() {
     ).expect("Failed to create a source buffer.");
 
     // Create the destination data and buffer
-    let destination_content = (0..64).map(|_| 0);
+    let destination_content = (0..1_000_000_000).map(|_| 0);
     let destination = Buffer::from_iter(
-        &memory_allocator,
+        memory_allocator,
         BufferCreateInfo{
             usage: BufferUsage::TRANSFER_DST, // This will be the destination of the data transfer
             ..Default::default()
@@ -127,4 +118,53 @@ fn main() {
         },
         destination_content
     ).expect("Failed to create a destination buffer");
+    (source, destination)
+}
+
+fn main() {
+    // Initialize Vulkan and store a reference to a device, a graphical queue family index, and the first queue of that queue family
+    let (device, queue, queue_family_index) = initialization();
+
+    // Create a general purpose memory allocator
+    let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
+
+    let (source, destination) = create_data(&memory_allocator);
+
+    // Create a standard command buffer allocator, required to make the gpu perform operations
+    let command_buffer_allocator = StandardCommandBufferAllocator::new(
+        device.clone(),
+        StandardCommandBufferAllocatorCreateInfo::default()
+    );
+
+    // Create a primary command buffer builder which can only submit commands once
+    let mut builder = AutoCommandBufferBuilder::primary(
+        &command_buffer_allocator,
+        queue_family_index,
+        CommandBufferUsage::OneTimeSubmit
+    ).unwrap();
+
+    // Set the operation(s) to perform, in this case we just want to move data from the source to the destination buffer
+    builder
+        .copy_buffer(CopyBufferInfo::buffers(source.clone(), destination.clone()))
+        .unwrap();
+
+    // Build the command buffer
+    let command_buffer = builder.build().unwrap();
+
+    // Execute the command buffer on the gpu
+    // Fence will return a future letting the cpu know when the gpu is done
+    let future = sync::now(device.clone())
+        .then_execute(queue.clone(), command_buffer)
+        .unwrap()
+        .then_signal_fence_and_flush() // Same as signal fence, and then flush
+        .unwrap();
+
+    // Wait for the gpu to be done with the calculations, don't limit the waiting time
+    future.wait(None).unwrap();
+    
+    // Read the data to check whether the operation was successful
+    let src_content = source.read().unwrap();
+    let destination_content = destination.read().unwrap();
+    assert_eq!(&*src_content, &*destination_content);
+    println!("Everyting succeeded!");
 }
