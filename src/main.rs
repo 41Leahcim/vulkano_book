@@ -6,7 +6,7 @@ use vulkano::{
     },
     instance::{Instance, InstanceCreateInfo},
     memory::allocator::{StandardMemoryAllocator, GenericMemoryAllocator, FreeListAllocator},
-    VulkanLibrary, image::{StorageImage, ImageDimensions}, format::Format,
+    VulkanLibrary, image::{StorageImage, ImageDimensions}, format::{Format, ClearColorValue}, command_buffer::{AutoCommandBufferBuilder, allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo}, CommandBufferUsage, ClearColorImageInfo},
 };
 
 fn list_gpus(instance: Arc<Instance>) {
@@ -46,7 +46,7 @@ fn get_queue_family_index(physical_device: Arc<PhysicalDevice>, selection: Queue
         .expect("Couldn't find a graphical queue family") as u32
 }
 
-fn initialization() -> (Arc<Device>, Arc<Queue>, u32) {
+fn initialization() -> (Arc<Device>, Arc<Queue>) {
     // Get a vulkan instance
     let library = VulkanLibrary::new().expect("No local Vulkan library/DLL");
     let instance =
@@ -84,7 +84,7 @@ fn initialization() -> (Arc<Device>, Arc<Queue>, u32) {
     // Select the first queue
     let queue = queues.next().unwrap();
 
-    (device, queue, queue_family_index)
+    (device, queue)
 }
 
 fn create_data(memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>, queue: Arc<Queue>) -> Arc<StorageImage>{
@@ -95,17 +95,41 @@ fn create_data(memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>
             height: 1024,
             array_layers: 1 // Images can be arrats of layers
         },
-        Format::R8G8B8A8_UNORM,
+        Format::R8G8B8A8_UNORM, // unsigned normalized 8-bit RGBA values
         Some(queue.queue_family_index())
     ).unwrap()
 }
 
 fn main() {
     // Initialize Vulkan and store a reference to a device, a graphical queue family index, and the first queue of that queue family
-    let (device, queue, queue_family_index) = initialization();
+    let (device, queue) = initialization();
 
     // Create a general purpose memory allocator
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 
-    let data_buffer = create_data(&memory_allocator, queue);
+    let image = create_data(&memory_allocator, queue.clone());
+
+    // Create a command buffer allocator
+    let command_buffer_allocator = StandardCommandBufferAllocator::new(
+        device.clone(),
+        StandardCommandBufferAllocatorCreateInfo::default()
+    );
+
+    // Create a command buffer builder
+    let mut builder = AutoCommandBufferBuilder::primary(
+        &command_buffer_allocator,
+        queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit
+    ).unwrap();
+
+    builder
+        .clear_color_image(
+            ClearColorImageInfo{
+                clear_value: ClearColorValue::Float([0.0, 0.0, 1.0, 1.0]), // normalized values (UNORM< SNORM< SRGB) are interpreted as floats
+                ..ClearColorImageInfo::image(image.clone())
+            }
+        )
+        .unwrap();
+
+    let command_buffer =  builder.build().unwrap();
 }
