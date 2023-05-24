@@ -25,8 +25,8 @@ use vulkano::{
     VulkanLibrary,
 };
 
-const IMAGE_WIDTH: u32 = 1024;
-const IMAGE_HEIGHT: u32 = 1024;
+const IMAGE_WIDTH: u32 = 1 << 14;
+const IMAGE_HEIGHT: u32 = 1 << 14;
 const WIDTH_INVOCATIONS: u32 = 8;
 const HEIGHT_INVOCATIONS: u32 = 8;
 
@@ -275,7 +275,7 @@ fn main() {
 
     // read the contents of the buffer into an image buffer, save the result as an image
     let buffer_content = buf.read().unwrap();
-    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
+    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(IMAGE_WIDTH, IMAGE_HEIGHT, &buffer_content[..]).unwrap();
     image.save("image.png").unwrap();
     println!("Everything succeeded!");
 }
