@@ -1,27 +1,40 @@
 use std::sync::Arc;
 
 use vulkano::{
+    buffer::{Buffer, BufferCreateInfo, BufferUsage},
+    device::{
+        physical::PhysicalDevice, Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags,
+    },
     instance::{Instance, InstanceCreateInfo},
-    VulkanLibrary, device::{physical::PhysicalDevice, QueueFlags, Device, DeviceCreateInfo, QueueCreateInfo}, memory::allocator::StandardMemoryAllocator,
+    memory::allocator::{AllocationCreateInfo, MemoryUsage, StandardMemoryAllocator},
+    VulkanLibrary,
 };
 
-fn list_gpus(instance: Arc<Instance>){
+fn list_gpus(instance: Arc<Instance>) {
     // List all available gpu's
     for device in instance
         .enumerate_physical_devices()
         .expect("Could not enumerate devices")
     {
-        println!("{}: {:?}, {}", device.properties().device_name, device.properties().driver_name, device.api_version());
+        println!(
+            "{}: {:?}, {}",
+            device.properties().device_name,
+            device.properties().driver_name,
+            device.api_version()
+        );
     }
 }
 
-fn list_queues(physical_device: Arc<PhysicalDevice>){
-    for family in physical_device.queue_family_properties(){
-        println!("Found a queue family with {:?} queue(s)", family.queue_count);
+fn list_queues(physical_device: Arc<PhysicalDevice>) {
+    for family in physical_device.queue_family_properties() {
+        println!(
+            "Found a queue family with {:?} queue(s)",
+            family.queue_count
+        );
     }
 }
 
-fn main() {
+fn initialization() -> (Arc<Device>, Arc<Queue>) {
     // Get a vulkan instance
     let library = VulkanLibrary::new().expect("No local Vulkan library/DLL");
     let instance =
@@ -44,27 +57,53 @@ fn main() {
         .queue_family_properties()
         .iter()
         .enumerate()
-        .position(|(_queue_family_index, queue_family_properties)|{
-            queue_family_properties.queue_flags.contains(QueueFlags::GRAPHICS)
+        .position(|(_queue_family_index, queue_family_properties)| {
+            queue_family_properties
+                .queue_flags
+                .contains(QueueFlags::GRAPHICS)
         })
         .expect("Couldn't find a graphical queue family") as u32;
-    
+
     // Create a new Vulkan device, returning the device and an iterator over queues on that device
     let (device, mut queues) = Device::new(
         physical_device,
-        DeviceCreateInfo{
+        DeviceCreateInfo {
             // Here we pass the desired queue family to use by index
-            queue_create_infos: vec![QueueCreateInfo{
+            queue_create_infos: vec![QueueCreateInfo {
                 queue_family_index,
                 ..Default::default()
             }],
             ..Default::default()
-        }
-    ).expect("Failed to create device");
+        },
+    )
+    .expect("Failed to create device");
 
     // Select the first queue
     let queue = queues.next().unwrap();
 
+    (device, queue)
+}
+
+fn main() {
+    // Initialize Vulkan and store a reference to a device and it's first graphical queue
+    let (device, queue) = initialization();
+
     // Create a general purpose memory allocator
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
+
+    // Allocate some data, MemoryUsage::Upload and MemoryUsage::Download are slow, but easy to access from cpu
+    let data: i32 = 12;
+    let buffer = Buffer::from_data(
+        &memory_allocator, // Memory allocator to use
+        BufferCreateInfo {
+            usage: BufferUsage::UNIFORM_BUFFER, // The usage for which we create the buffer
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            usage: MemoryUsage::Upload, // How we will use the memory, moving data between cpu and gpu, or keep it on the gpu
+            ..Default::default()
+        },
+        data, // The value(s) with which the buffer will be filled
+    )
+    .expect("Failed to create buffer");
 }
