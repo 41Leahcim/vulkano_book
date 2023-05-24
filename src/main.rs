@@ -5,8 +5,8 @@ use vulkano::{
         physical::PhysicalDevice, Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags,
     },
     instance::{Instance, InstanceCreateInfo},
-    memory::allocator::{StandardMemoryAllocator, GenericMemoryAllocator, FreeListAllocator},
-    VulkanLibrary, image::{StorageImage, ImageDimensions}, format::{Format, ClearColorValue}, command_buffer::{AutoCommandBufferBuilder, allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo}, CommandBufferUsage, ClearColorImageInfo},
+    memory::allocator::{StandardMemoryAllocator, GenericMemoryAllocator, FreeListAllocator, AllocationCreateInfo, MemoryUsage},
+    VulkanLibrary, image::{StorageImage, ImageDimensions}, format::{Format, ClearColorValue}, command_buffer::{AutoCommandBufferBuilder, allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo}, CommandBufferUsage, ClearColorImageInfo, CopyImageToBufferInfo}, buffer::{Subbuffer, Buffer, BufferCreateInfo, BufferUsage}, sync::{self, GpuFuture},
 };
 
 fn list_gpus(instance: Arc<Instance>) {
@@ -87,7 +87,7 @@ fn initialization() -> (Arc<Device>, Arc<Queue>) {
     (device, queue)
 }
 
-fn create_data(memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>, queue: Arc<Queue>) -> Arc<StorageImage>{
+fn create_image(memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>, queue: Arc<Queue>) -> Arc<StorageImage>{
     StorageImage::new(
         memory_allocator,
         ImageDimensions::Dim2d {
@@ -100,6 +100,22 @@ fn create_data(memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>
     ).unwrap()
 }
 
+fn create_buffer(memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>) -> Subbuffer<[u8]>{
+    // Create a buffer
+    Buffer::from_iter(
+        memory_allocator,
+        BufferCreateInfo{
+            usage: BufferUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo{
+            usage: MemoryUsage::Download,
+            ..Default::default()
+        },
+        (0..1024 * 1024 * 4).map(|_| 0u8)
+    ).expect("Failed to create buffer")
+}
+
 fn main() {
     // Initialize Vulkan and store a reference to a device, a graphical queue family index, and the first queue of that queue family
     let (device, queue) = initialization();
@@ -107,7 +123,8 @@ fn main() {
     // Create a general purpose memory allocator
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 
-    let image = create_data(&memory_allocator, queue.clone());
+    let image = create_image(&memory_allocator, queue.clone());
+    let buf = create_buffer(&memory_allocator);
 
     // Create a command buffer allocator
     let command_buffer_allocator = StandardCommandBufferAllocator::new(
@@ -129,7 +146,22 @@ fn main() {
                 ..ClearColorImageInfo::image(image.clone())
             }
         )
+        .unwrap()
+        .copy_image_to_buffer(
+            CopyImageToBufferInfo::image_buffer(
+                image.clone(), // image avlues are not interpreted as floating point values here, but as their actual type in memory
+                buf.clone()
+            )
+        )
         .unwrap();
 
     let command_buffer =  builder.build().unwrap();
+    
+    let future = sync::now(device.clone())
+        .then_execute(queue.clone(), command_buffer)
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap();
+
+    future.wait(None).unwrap();
 }
