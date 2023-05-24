@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use vulkano::{
-    buffer::{Buffer, BufferCreateInfo, BufferUsage},
+    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage},
     device::{
         physical::PhysicalDevice, Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags,
     },
@@ -84,6 +84,13 @@ fn initialization() -> (Arc<Device>, Arc<Queue>) {
     (device, queue)
 }
 
+#[derive(Debug, BufferContents)]
+#[repr(C)]
+struct MyStruct {
+    a: u32,
+    b: u32,
+}
+
 fn main() {
     // Initialize Vulkan and store a reference to a device and it's first graphical queue
     let (device, queue) = initialization();
@@ -104,6 +111,42 @@ fn main() {
             ..Default::default()
         },
         data, // The value(s) with which the buffer will be filled
+    )
+    .expect("Failed to create buffer");
+
+    // Create a struct
+    let data = MyStruct { a: 5, b: 69 };
+
+    // Allocate some data to put the struct in the memory of the gpu
+    let buffer = Buffer::from_data(
+        &memory_allocator, // Memory allocator to use
+        BufferCreateInfo {
+            usage: BufferUsage::UNIFORM_BUFFER, // The usage for which we create the buffer
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            usage: MemoryUsage::Upload, // How we will use the memory, moving data between cpu and gpu, or keep it on the gpu
+            ..Default::default()
+        },
+        data, // The value(s) with which the buffer will be filled
+    )
+    .expect("Failed to create buffer");
+
+    // Create an iterator
+    let iter = (0..128).map(|_| 5u8);
+
+    // Allocate some data to put the data of the iterator in the memory of the gpu
+    let buffer = Buffer::from_iter(
+        &memory_allocator, // Memory allocator to use
+        BufferCreateInfo {
+            usage: BufferUsage::UNIFORM_BUFFER, // The usage for which we create the buffer
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            usage: MemoryUsage::Upload, // How we will use the memory, moving data between cpu and gpu, or keep it on the gpu
+            ..Default::default()
+        },
+        iter, // The value(s) with which the buffer will be filled
     )
     .expect("Failed to create buffer");
 }
