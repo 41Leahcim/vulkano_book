@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use vulkano::{
     instance::{Instance, InstanceCreateInfo},
-    VulkanLibrary, device::{physical::PhysicalDevice, QueueFlags, Device, DeviceCreateInfo, QueueCreateInfo},
+    VulkanLibrary, device::{physical::PhysicalDevice, QueueFlags, Device, DeviceCreateInfo, QueueCreateInfo}, memory::allocator::StandardMemoryAllocator,
 };
 
 fn list_gpus(instance: Arc<Instance>){
@@ -64,4 +64,7 @@ fn main() {
 
     // Select the first queue
     let queue = queues.next().unwrap();
+
+    // Create a general purpose memory allocator
+    let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 }
