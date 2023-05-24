@@ -88,37 +88,21 @@ fn initialization() -> (Arc<Device>, Arc<Queue>, u32) {
     (device, queue, queue_family_index)
 }
 
-fn create_data(memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>) -> (Subbuffer<[i32]>, Subbuffer<[i32]>){
+fn create_data(memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>) -> Subbuffer<[u32]>{
     // Create the source data and buffer
-    let source_content = 0..1_000_000_000;
-    let source = Buffer::from_iter(
+    let data_iter = 0..65536u32;
+    Buffer::from_iter(
         memory_allocator,
         BufferCreateInfo{
-            usage: BufferUsage::TRANSFER_SRC, // This data will be used as source for a data transfer
+            usage: BufferUsage::STORAGE_BUFFER, // This data will be stored for calculations performed with a compute shader
             ..Default::default()
         },
         AllocationCreateInfo{
-            usage: MemoryUsage::Upload, // This will only upload data to the gpu
+            usage: MemoryUsage::Upload,
             ..Default::default()
         },
-        source_content
-    ).expect("Failed to create a source buffer.");
-
-    // Create the destination data and buffer
-    let destination_content = (0..1_000_000_000).map(|_| 0);
-    let destination = Buffer::from_iter(
-        memory_allocator,
-        BufferCreateInfo{
-            usage: BufferUsage::TRANSFER_DST, // This will be the destination of the data transfer
-            ..Default::default()
-        },
-        AllocationCreateInfo{
-            usage: MemoryUsage::Download, // This will only download data from the gpu
-            ..Default::default()
-        },
-        destination_content
-    ).expect("Failed to create a destination buffer");
-    (source, destination)
+        data_iter
+    ).expect("Failed to create buffer.")
 }
 
 fn main() {
@@ -128,43 +112,5 @@ fn main() {
     // Create a general purpose memory allocator
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 
-    let (source, destination) = create_data(&memory_allocator);
-
-    // Create a standard command buffer allocator, required to make the gpu perform operations
-    let command_buffer_allocator = StandardCommandBufferAllocator::new(
-        device.clone(),
-        StandardCommandBufferAllocatorCreateInfo::default()
-    );
-
-    // Create a primary command buffer builder which can only submit commands once
-    let mut builder = AutoCommandBufferBuilder::primary(
-        &command_buffer_allocator,
-        queue_family_index,
-        CommandBufferUsage::OneTimeSubmit
-    ).unwrap();
-
-    // Set the operation(s) to perform, in this case we just want to move data from the source to the destination buffer
-    builder
-        .copy_buffer(CopyBufferInfo::buffers(source.clone(), destination.clone()))
-        .unwrap();
-
-    // Build the command buffer
-    let command_buffer = builder.build().unwrap();
-
-    // Execute the command buffer on the gpu
-    // Fence will return a future letting the cpu know when the gpu is done
-    let future = sync::now(device.clone())
-        .then_execute(queue.clone(), command_buffer)
-        .unwrap()
-        .then_signal_fence_and_flush() // Same as signal fence, and then flush
-        .unwrap();
-
-    // Wait for the gpu to be done with the calculations, don't limit the waiting time
-    future.wait(None).unwrap();
-    
-    // Read the data to check whether the operation was successful
-    let src_content = source.read().unwrap();
-    let destination_content = destination.read().unwrap();
-    assert_eq!(&*src_content, &*destination_content);
-    println!("Everyting succeeded!");
+    let data = create_data(&memory_allocator);
 }
