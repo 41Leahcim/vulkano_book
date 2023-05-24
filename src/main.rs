@@ -98,73 +98,33 @@ fn main() {
     // Create a general purpose memory allocator
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 
-    // Allocate some data, MemoryUsage::Upload and MemoryUsage::Download are slow, but easy to access from cpu
-    let data: i32 = 12;
-    let i32_buffer = Buffer::from_data(
-        &memory_allocator, // Memory allocator to use
-        BufferCreateInfo {
-            usage: BufferUsage::UNIFORM_BUFFER, // The usage for which we create the buffer
+    // Create the source data and buffer
+    let source_content = 0..64;
+    let source = Buffer::from_iter(
+        &memory_allocator,
+        BufferCreateInfo{
+            usage: BufferUsage::TRANSFER_SRC, // This data will be used as source for a data transfer
             ..Default::default()
         },
-        AllocationCreateInfo {
-            usage: MemoryUsage::Upload, // How we will use the memory, moving data between cpu and gpu, or keep it on the gpu
+        AllocationCreateInfo{
+            usage: MemoryUsage::Upload, // This will only upload data to the gpu
             ..Default::default()
         },
-        data, // The value(s) with which the buffer will be filled
-    )
-    .expect("Failed to create buffer");
+        source_content
+    ).expect("Failed to create a source buffer.");
 
-    // Create a struct
-    let data = MyStruct { a: 5, b: 69 };
-
-    // Allocate some data to put the struct in the memory of the gpu
-    let my_struct_buffer = Buffer::from_data(
-        &memory_allocator, // Memory allocator to use
-        BufferCreateInfo {
-            usage: BufferUsage::UNIFORM_BUFFER, // The usage for which we create the buffer
+    // Create the destination data and buffer
+    let destination_content = (0..64).map(|_| 0);
+    let destination = Buffer::from_iter(
+        &memory_allocator,
+        BufferCreateInfo{
+            usage: BufferUsage::TRANSFER_DST, // This will be the destination of the data transfer
             ..Default::default()
         },
-        AllocationCreateInfo {
-            usage: MemoryUsage::Upload, // How we will use the memory, moving data between cpu and gpu, or keep it on the gpu
+        AllocationCreateInfo{
+            usage: MemoryUsage::Download, // This will only download data from the gpu
             ..Default::default()
         },
-        data, // The value(s) with which the buffer will be filled
-    )
-    .expect("Failed to create buffer");
-
-    // Create an iterator
-    let iter = (0..128).map(|_| 5u8);
-
-    // Allocate some data to put the data of the iterator in the memory of the gpu
-    let iter_buffer = Buffer::from_iter(
-        &memory_allocator, // Memory allocator to use
-        BufferCreateInfo {
-            usage: BufferUsage::UNIFORM_BUFFER, // The usage for which we create the buffer
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            usage: MemoryUsage::Upload, // How we will use the memory, moving data between cpu and gpu, or keep it on the gpu
-            ..Default::default()
-        },
-        iter, // The value(s) with which the buffer will be filled
-    )
-    .expect("Failed to create buffer");
-
-    // Modify the values in the my_struct_buffer, only the cpu will be able to access it as long as the BufferWriteGuard exists
-    {
-        let mut content = my_struct_buffer.write().unwrap();
-        content.a *= 2;
-        content.b = 9;
-    }// End scope to allow the gpu to access the data again
-
-    // Repeat for the iter_buffer
-    {
-        let mut content = iter_buffer.write().unwrap();
-        content[12] = 83;
-        content[7] = 3;
-    }
-
-    // This won't stop the gpu from accessing the data
-    let content = iter_buffer.read().unwrap();
-    println!("{}", content[7]);
+        destination_content
+    ).expect("Failed to create a destination buffer");
 }
