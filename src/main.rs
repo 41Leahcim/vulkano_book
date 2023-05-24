@@ -7,7 +7,7 @@ use vulkano::{
     },
     instance::{Instance, InstanceCreateInfo},
     memory::allocator::{AllocationCreateInfo, MemoryUsage, StandardMemoryAllocator, GenericMemoryAllocator, FreeListAllocator},
-    VulkanLibrary, pipeline::ComputePipeline,
+    VulkanLibrary, pipeline::{ComputePipeline, Pipeline}, descriptor_set::{allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet},
 };
 
 fn list_gpus(instance: Arc<Instance>) {
@@ -140,7 +140,7 @@ fn main() {
     // Create a general purpose memory allocator
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 
-    let data = create_data(&memory_allocator);
+    let data_buffer = create_data(&memory_allocator);
 
     // Load the shader into the device
     let shader = cs::load(device.clone())
@@ -154,4 +154,25 @@ fn main() {
         None,
         |_|{}
     ).expect("Failed to create compute pipeline");
+
+    // Create a standard descriptor set allocator
+    let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
+
+    // Retrieve the pipeline descriptor set layouts
+    let pipeline_layout = compute_pipeline.layout();
+    let descriptor_set_layouts = pipeline_layout.set_layouts();
+
+    // Fetch the layout specific to the target pass
+    let descriptor_set_layout_index = 0;
+    let descriptor_set_layout = descriptor_set_layouts
+        .get(descriptor_set_layout_index)
+        .unwrap();
+    
+    // Create the actual descriptor set
+    let descriptor_set = PersistentDescriptorSet::new(
+        &descriptor_set_allocator,
+        descriptor_set_layout.clone(),
+        [WriteDescriptorSet::buffer(0, data_buffer.clone())]
+    )
+    .unwrap();
 }
