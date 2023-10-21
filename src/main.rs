@@ -2,13 +2,11 @@ use std::sync::Arc;
 
 use image::{ImageBuffer, Rgba};
 use vulkano::{
-    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
+    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage},
     command_buffer::{
         allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
-        AutoCommandBufferBuilder, CommandBufferUsage, CopyImageToBufferInfo,
-    },
-    descriptor_set::{
-        allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
+        AutoCommandBufferBuilder, CommandBufferUsage, CopyImageToBufferInfo, RenderPassBeginInfo,
+        SubpassContents,
     },
     device::{
         physical::PhysicalDevice, Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags,
@@ -20,15 +18,21 @@ use vulkano::{
         AllocationCreateInfo, FreeListAllocator, GenericMemoryAllocator, MemoryUsage,
         StandardMemoryAllocator,
     },
-    pipeline::{ComputePipeline, Pipeline, PipelineBindPoint},
+    pipeline::{
+        graphics::{
+            input_assembly::InputAssemblyState,
+            vertex_input::Vertex,
+            viewport::{Viewport, ViewportState},
+        },
+        GraphicsPipeline,
+    },
+    render_pass::{Framebuffer, FramebufferCreateInfo, Subpass},
     sync::{self, GpuFuture},
     VulkanLibrary,
 };
 
 const IMAGE_WIDTH: u32 = 1 << 14;
-const IMAGE_HEIGHT: u32 = 1 << 14;
-const WIDTH_INVOCATIONS: u32 = 8;
-const HEIGHT_INVOCATIONS: u32 = 8;
+const IMAGE_HEIGHT: u32 = IMAGE_WIDTH;
 
 fn list_gpus(instance: Arc<Instance>) {
     // List all available gpu's
@@ -124,70 +128,51 @@ fn create_image(
     .unwrap()
 }
 
-fn create_buffer(
-    memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>,
-) -> Subbuffer<[u8]> {
-    // Create a buffer
-    Buffer::from_iter(
-        memory_allocator,
-        BufferCreateInfo {
-            usage: BufferUsage::TRANSFER_DST,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            usage: MemoryUsage::Download,
-            ..Default::default()
-        },
-        (0..IMAGE_WIDTH * IMAGE_HEIGHT * 4).map(|_| 0u8),
-    )
-    .expect("Failed to create buffer")
+/// A simple 2D Vertex (top-left = (-1, -1), bottom-right = (1, 1))
+#[derive(BufferContents, Vertex, Clone, Copy)]
+#[repr(C)]
+struct Vertex2D {
+    #[format(R32G32_SFLOAT)]
+    position: [f32; 2],
 }
 
-mod image_shader {
+struct Triangle {
+    vertices: [Vertex2D; 3],
+}
+
+impl Triangle {
+    pub fn to_vec(&self) -> Vec<Vertex2D> {
+        self.vertices.to_vec()
+    }
+}
+
+mod vs {
     vulkano_shaders::shader! {
-        ty: "compute",
+        ty: "vertex",
         src: r"
 // Version 4.60 of GLSL, set the GLSL version at the start of every shader
 #version 460
 
-// The number of invocations per dimension per work group (at least 32, at most 64)
-// z is 1 for 2-dimensional arrays, but can be higher for 3-dimensional arrays
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(location = 0) in vec2 position;
 
-// A descriptor of an image2D with the name img, which has 4 channels of 8 bits per pixel
-// Bound as the first binding of the first descriptor set
-layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
-
-// Main function
 void main(){
-    // Normalize the coordinates
-    vec2 norm_coordinates = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(img));
-
-    // Calculate complex number that corresponds to the pixel of the image to modify
-    vec2 c = (norm_coordinates - vec2(0.5)) * 2.0 - vec2(1.0, 0.0);
-
-    // Search for the complex number in the mandelbrot set
-    // It is in the mandelbrot set if z² + c diverges when iterated from z = 0 (z being a complex number)
-    // It's diverging if length(z) > 4.0
-    vec2 z = vec2(0.0, 0.0);
-    float i;
-    for(i = 0.0;i < 1.0;i += 0.005){
-        z = vec2(
-            z.x * z.x - z.y * z.y + c.x,
-            z.y * z.x + z.x * z.y + c.y
-        );
-        if(length(z) > 4.0){
-            break;
-        }
+    gl_Position = vec4(position, 0.0, 1.0);
+}"
     }
-
-    // The closer c is to the set, the higher i will be, so use i for the current pixel
-    vec4 to_write = vec4(vec3(i), 1.0);
-
-    // Write to_write to the pixel with imageStore, to make sure correct type is written to the pixel
-    imageStore(img, ivec2(gl_GlobalInvocationID.xy), to_write);
 }
-        "
+
+mod fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        src: r"
+// Version 4.60 of GLSL, set the GLSL version at the start of every shader
+#version 460
+        
+layout(location = 0) out vec4 f_color;
+        
+void main(){
+    f_color = vec4(1.0, 0.0, 0.0, 1.0);
+}"
     }
 }
 
@@ -198,44 +183,84 @@ fn main() {
     // Create a general purpose memory allocator
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 
-    // Create the image and buffer
+    // Create an image
     let image = create_image(&memory_allocator, queue.clone());
-    let buf = create_buffer(&memory_allocator);
 
-    // Create an image view
+    // Create a triangle
+    let triangle = Triangle {
+        vertices: [
+            Vertex2D {
+                position: [-0.5, -0.5],
+            },
+            Vertex2D {
+                position: [0.0, 0.5],
+            },
+            Vertex2D {
+                position: [0.5, -0.25],
+            },
+        ],
+    };
+
+    // Create a vertex buffer, to define the shape to draw on the screen
+    let vertex_buffer = Buffer::from_iter(
+        &memory_allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::VERTEX_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            usage: MemoryUsage::Upload,
+            ..Default::default()
+        },
+        triangle.to_vec(),
+    )
+    .unwrap();
+
+    // Create a render pass
+    let render_pass = vulkano::single_pass_renderpass!(
+        // The GPU to use for drawing
+        device.clone(),
+
+        // Settings to pass through the pass (only 1 group in this case)
+        attachments: {
+            // A settings group to pass
+            color: {
+                load: Clear, // Clear the image when in a pass using this value
+                // Store the output of the pass in the image, use DontCare if you don't want to store
+                store: Store,
+                format: Format::R8G8B8A8_UNORM, // RGBA use 8 bits each, not normalized
+                samples: 1 // don't use multisampling
+            }
+        },
+
+        // The pass
+        pass: {
+            color: [color], // Use the color settings
+            depth_stencil: {} // Don't use a depth stencil
+        }
+    )
+    .unwrap();
+
+    // Create a view for the image
     let view = ImageView::new_default(image.clone()).unwrap();
 
-    // Load the shader
-    let shader = image_shader::load(device.clone()).expect("Failed to create shader module");
-
-    // Create a compute pipeline
-    let compute_pipeline = ComputePipeline::new(
-        device.clone(),
-        shader.entry_point("main").unwrap(),
-        &(),
-        None,
-        |_| {},
+    // Create a framebuffer
+    let framebuffer = Framebuffer::new(
+        render_pass.clone(),
+        FramebufferCreateInfo {
+            attachments: vec![view],
+            ..Default::default()
+        },
     )
-    .expect("Failed to create compute pipeline");
+    .unwrap();
 
-    // Create a standard descriptor allocator
-    let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
-    // Create a command buffer allocator
+    // Create an allocator for the command buffer
     let command_buffer_allocator = StandardCommandBufferAllocator::new(
         device.clone(),
         StandardCommandBufferAllocatorCreateInfo::default(),
     );
 
-    // Create a new descriptor set by adding the image view
-    let layout = compute_pipeline.layout().set_layouts().get(0).unwrap();
-    let set = PersistentDescriptorSet::new(
-        &descriptor_set_allocator,
-        layout.clone(),
-        [WriteDescriptorSet::image_view(0, view.clone())],
-    )
-    .unwrap();
-
-    // Create a command buffer builder
+    // Create a command buffer builder for the command buffer
     let mut builder = AutoCommandBufferBuilder::primary(
         &command_buffer_allocator,
         queue.queue_family_index(),
@@ -243,39 +268,123 @@ fn main() {
     )
     .unwrap();
 
-    // Add commands to the builder to clear the image, and copy the image to the buffer
+    // Begin and immediately end a render pass
     builder
-        .bind_pipeline_compute(compute_pipeline.clone())
-        .bind_descriptor_sets(
-            PipelineBindPoint::Compute,
-            compute_pipeline.layout().clone(),
-            0,
-            set,
+        .begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: vec![Some([0.0, 0.0, 1.0, 1.0].into())],
+                ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
+            },
+            SubpassContents::Inline,
         )
-        .dispatch([IMAGE_WIDTH / WIDTH_INVOCATIONS, IMAGE_HEIGHT / HEIGHT_INVOCATIONS, 1])
         .unwrap()
-        .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
-            image.clone(), // image avlues are not interpreted as floating point values here, but as their actual type in memory
-            buf.clone(),
-        ))
+        .end_render_pass()
+        .unwrap();
+
+    // Load the vertex and fragment shaders
+    let vs = vs::load(device.clone()).expect("Failed to create shader module");
+    let fs = fs::load(device.clone()).expect("Failed to create shader module");
+
+    // Create a viewport
+    let viewport = Viewport {
+        origin: [0.0, 0.0],
+        dimensions: [IMAGE_WIDTH as f32, IMAGE_HEIGHT as f32],
+        depth_range: 0.0..1.0,
+    };
+
+    // Create a graphics pipeline
+    let pipeline = GraphicsPipeline::start()
+        // Load vertices per vertex
+        .vertex_input_state(Vertex2D::per_vertex())
+        // The vertex shader starts at main, and doesn't have any specialization constants.
+        // A vulkan shader could have multiple entry points, so the entry point has to be set.
+        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        // Indicate the type of primitives, default is a list of triangles
+        .input_assembly_state(InputAssemblyState::new())
+        // Set the fixed viewport
+        // Use only one fixed viewport, better performance but viewport can't change
+        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
+        // Same as the vertex input, but this for the fragment input
+        .fragment_shader(fs.entry_point("main").unwrap(), ())
+        // This graphics pipeline object concerns the first pass of the render pass.
+        .render_pass(Subpass::from(render_pass, 0).unwrap())
+        // Build the pipeline, now that everything is specified
+        .build(device.clone())
+        .unwrap();
+
+    // Create a buffer for storing the image on RAM
+    let buffer = Buffer::from_iter(
+        &memory_allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            usage: MemoryUsage::Download,
+            ..Default::default()
+        },
+        (0..IMAGE_WIDTH * IMAGE_HEIGHT * 8).map(|_| 0u8),
+    )
+    .expect("Failed to create buffer");
+
+    // Create a new command buffer builder
+    let mut builder = AutoCommandBufferBuilder::primary(
+        &command_buffer_allocator,
+        queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+    .unwrap();
+
+    // Start a new render pass
+    builder
+        .begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: vec![Some([0.0, 0.0, 1.0, 1.0].into())],
+                ..RenderPassBeginInfo::framebuffer(framebuffer)
+            },
+            SubpassContents::Inline,
+        )
+        .unwrap()
+        // Bind the graphics pipeline
+        .bind_pipeline_graphics(pipeline)
+        // Bind the vertex buffer
+        .bind_vertex_buffers(0, vertex_buffer)
+        // Draw the triangle on the screen
+        // Calling draw for each object is easier than calling it once for everything
+        .draw(3, 1, 0, 0)
+        .unwrap()
+        // End the render pass
+        .end_render_pass()
+        .unwrap()
+        // Copy the image to a buffer on RAM
+        .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(image, buffer.clone()))
         .unwrap();
 
     // Build the command buffer
     let command_buffer = builder.build().unwrap();
 
-    // Create a future executing the commands, end with a fence signal, flush the commands
-    let future = sync::now(device.clone())
-        .then_execute(queue.clone(), command_buffer)
+    // Synchronize the GPU and CPU
+    sync::now(device)
+        // Prepare the queue and command buffer to execute
+        .then_execute(queue, command_buffer)
         .unwrap()
+        // Receive a signal when done, send the commands to execute
         .then_signal_fence_and_flush()
+        .unwrap()
+        // Wait until the commands have been executed
+        .wait(None)
         .unwrap();
 
-    // Wait for the future to be done
-    future.wait(None).unwrap();
+    // Read the buffer contents
+    let buffer_content = buffer.read().unwrap();
 
-    // read the contents of the buffer into an image buffer, save the result as an image
-    let buffer_content = buf.read().unwrap();
-    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(IMAGE_WIDTH, IMAGE_HEIGHT, &buffer_content[..]).unwrap();
+    // Turn the buffer contents into an image
+    let image =
+        ImageBuffer::<Rgba<u8>, _>::from_raw(IMAGE_WIDTH, IMAGE_HEIGHT, &buffer_content[..])
+            .unwrap();
+
+    // Save the image
     image.save("image.png").unwrap();
+
     println!("Everything succeeded!");
 }
