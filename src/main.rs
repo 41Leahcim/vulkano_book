@@ -34,7 +34,7 @@ use vulkano::{
 const IMAGE_WIDTH: u32 = 1 << 14;
 const IMAGE_HEIGHT: u32 = IMAGE_WIDTH;
 
-fn list_gpus(instance: Arc<Instance>) {
+fn list_gpus(instance: &Arc<Instance>) {
     // List all available gpu's
     for device in instance
         .enumerate_physical_devices()
@@ -49,7 +49,7 @@ fn list_gpus(instance: Arc<Instance>) {
     }
 }
 
-fn list_queues(physical_device: Arc<PhysicalDevice>) {
+fn list_queues(physical_device: &Arc<PhysicalDevice>) {
     for family in physical_device.queue_family_properties() {
         println!(
             "Found a queue family with {:?} queue(s)",
@@ -58,7 +58,8 @@ fn list_queues(physical_device: Arc<PhysicalDevice>) {
     }
 }
 
-fn get_queue_family_index(physical_device: Arc<PhysicalDevice>, selection: QueueFlags) -> u32 {
+#[allow(clippy::cast_possible_truncation)]
+fn get_queue_family_index(physical_device: &Arc<PhysicalDevice>, selection: QueueFlags) -> u32 {
     physical_device
         .queue_family_properties()
         .iter()
@@ -69,13 +70,17 @@ fn get_queue_family_index(physical_device: Arc<PhysicalDevice>, selection: Queue
         .expect("Couldn't find a graphical queue family") as u32
 }
 
-fn initialization() -> (Arc<Device>, Arc<Queue>) {
+fn initialization() -> (
+    Arc<Device>,
+    Arc<Queue>,
+    GenericMemoryAllocator<Arc<FreeListAllocator>>,
+) {
     // Get a vulkan instance
     let library = VulkanLibrary::new().expect("No local Vulkan library/DLL");
     let instance =
         Instance::new(library, InstanceCreateInfo::default()).expect("Failed to create instance");
 
-    list_gpus(instance.clone());
+    list_gpus(&instance);
 
     // Select the first gpu (we would want to allow the user to select one, in a real application)
     let physical_device = instance
@@ -85,10 +90,10 @@ fn initialization() -> (Arc<Device>, Arc<Queue>) {
         .expect("No devices available");
 
     // List the queues available on the selected device
-    list_queues(physical_device.clone());
+    list_queues(&physical_device);
 
     // Select a queue that supports graphical operations
-    let queue_family_index = get_queue_family_index(physical_device.clone(), QueueFlags::GRAPHICS);
+    let queue_family_index = get_queue_family_index(&physical_device, QueueFlags::GRAPHICS);
 
     // Create a new Vulkan device, returning the device and an iterator over queues on that device
     let (device, mut queues) = Device::new(
@@ -107,12 +112,15 @@ fn initialization() -> (Arc<Device>, Arc<Queue>) {
     // Select the first queue
     let queue = queues.next().unwrap();
 
-    (device, queue)
+    // Create a general purpose memory allocator
+    let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
+
+    (device, queue, memory_allocator)
 }
 
 fn create_image(
     memory_allocator: &GenericMemoryAllocator<Arc<FreeListAllocator>>,
-    queue: Arc<Queue>,
+    queue: &Arc<Queue>,
 ) -> Arc<StorageImage> {
     // Create an image
     StorageImage::new(
@@ -136,11 +144,23 @@ struct Vertex2D {
     position: [f32; 2],
 }
 
+impl Vertex2D {
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { position: [x, y] }
+    }
+}
+
 struct Triangle {
     vertices: [Vertex2D; 3],
 }
 
 impl Triangle {
+    pub fn new(vertices: impl Into<[Vertex2D; 3]>) -> Self {
+        Self {
+            vertices: vertices.into(),
+        }
+    }
+
     pub fn to_vec(&self) -> Vec<Vertex2D> {
         self.vertices.to_vec()
     }
@@ -176,30 +196,20 @@ void main(){
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     // Initialize Vulkan and store a reference to a device, a graphical queue family index, and the first queue of that queue family
-    let (device, queue) = initialization();
-
-    // Create a general purpose memory allocator
-    let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
+    let (device, queue, memory_allocator) = initialization();
 
     // Create an image
-    let image = create_image(&memory_allocator, queue.clone());
+    let image = create_image(&memory_allocator, &queue);
 
     // Create a triangle
-    let triangle = Triangle {
-        vertices: [
-            Vertex2D {
-                position: [-0.5, -0.5],
-            },
-            Vertex2D {
-                position: [0.0, 0.5],
-            },
-            Vertex2D {
-                position: [0.5, -0.25],
-            },
-        ],
-    };
+    let triangle = Triangle::new([
+        Vertex2D::new(-0.5, -0.5),
+        Vertex2D::new(0.0, 0.5),
+        Vertex2D::new(0.5, -0.25),
+    ]);
 
     // Create a vertex buffer, to define the shape to draw on the screen
     let vertex_buffer = Buffer::from_iter(
@@ -260,32 +270,12 @@ fn main() {
         StandardCommandBufferAllocatorCreateInfo::default(),
     );
 
-    // Create a command buffer builder for the command buffer
-    let mut builder = AutoCommandBufferBuilder::primary(
-        &command_buffer_allocator,
-        queue.queue_family_index(),
-        CommandBufferUsage::OneTimeSubmit,
-    )
-    .unwrap();
-
-    // Begin and immediately end a render pass
-    builder
-        .begin_render_pass(
-            RenderPassBeginInfo {
-                clear_values: vec![Some([0.0, 0.0, 1.0, 1.0].into())],
-                ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
-            },
-            SubpassContents::Inline,
-        )
-        .unwrap()
-        .end_render_pass()
-        .unwrap();
-
     // Load the vertex and fragment shaders
     let vs = vs::load(device.clone()).expect("Failed to create shader module");
     let fs = fs::load(device.clone()).expect("Failed to create shader module");
 
     // Create a viewport
+    #[allow(clippy::cast_precision_loss)]
     let viewport = Viewport {
         origin: [0.0, 0.0],
         dimensions: [IMAGE_WIDTH as f32, IMAGE_HEIGHT as f32],
