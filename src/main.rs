@@ -31,7 +31,7 @@ use vulkano::{
         AcquireError, Surface, Swapchain, SwapchainCreateInfo, SwapchainCreationError,
         SwapchainPresentInfo,
     },
-    sync::{self, FlushError, GpuFuture},
+    sync::{self, future::FenceSignalFuture, FlushError, GpuFuture},
     VulkanLibrary,
 };
 use vulkano_win::VkSurfaceBuild;
@@ -454,6 +454,9 @@ fn main() {
 
     let mut window_resized = false;
     let mut recreate_swapchain = false;
+    let frames_in_flight = images.len();
+    let mut fences: Vec<Option<Arc<FenceSignalFuture<_>>>> = vec![None; frames_in_flight];
+    let mut previous_fence_i = 0;
     let mut last_frame = Instant::now();
 
     event_loop.run(move |event, _, control_flow| match event {
@@ -530,8 +533,26 @@ fn main() {
                 recreate_swapchain = true;
             }
 
+            // Wait for the fence related to this image to finish.
+            // Normally this would be the oldest fence, that most likely has already finished
+            if let Some(image_fence) = &fences[image_i as usize] {
+                image_fence.wait(None).unwrap();
+            }
+
+            let previous_future = match fences[previous_fence_i as usize].clone() {
+                // Use the existing fence signal
+                Some(fence) => fence.boxed(),
+
+                // Create a NowFuture
+                None => {
+                    let mut now = sync::now(device.clone());
+                    now.cleanup_finished();
+                    now.boxed()
+                }
+            };
+
             // Create the future to submit to the GPU
-            let execution = sync::now(device.clone())
+            let future = previous_future
                 .join(acquire_future)
                 .then_execute(queue.clone(), command_buffers[image_i as usize].clone())
                 .unwrap()
@@ -541,12 +562,21 @@ fn main() {
                 )
                 .then_signal_fence_and_flush();
 
-            match execution {
-                // Wait for the GPU to finish
-                Ok(future) => future.wait(None).unwrap(),
-                Err(FlushError::OutOfDate) => recreate_swapchain = true,
-                Err(e) => println!("Failed to flush future: {e}"),
-            }
+            fences[image_i as usize] = match future {
+                #[allow(clippy::arc_with_non_send_sync)]
+                Ok(value) => Some(Arc::new(value)),
+                Err(FlushError::OutOfDate) => {
+                    recreate_swapchain = true;
+                    None
+                }
+                Err(e) => {
+                    println!("Failed to flush future: {e}");
+                    None
+                }
+            };
+
+            previous_fence_i = image_i;
+
             let now = Instant::now();
             println!(
                 "{} fps",
